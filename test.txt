@@ -1,0 +1,5 @@
+#chromosome position  allele  alleleFrequency
+chrM	2	T	100
+chrM	240	T	100
+chrM	330	A	230
+chrM	442	G	100
