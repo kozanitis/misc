@@ -41,7 +41,7 @@ object BeaconReads extends ADAMCommandCompanion {
 class BeaconReadsArgs extends Args4jBase with SparkArgs with ParquetArgs {
   @Argument(required = true, metaVar = "INPUT", usage = "The ADAM file to apply the transforms to", index = 0)
   var inputPath: String = null
-  @Argument(required = true, metaVar = "INPUTBEACON", usage = "Variants file", index = 1)
+  @Argument(required = true, metaVar = "INPUTBEACON", usage = "Input allele count file", index = 1)
   var inputPathBeacon: String = null
 }
 
@@ -51,39 +51,47 @@ class BeaconReads(protected val args: BeaconReadsArgs) extends ADAMSparkCommand[
   def run(sc: SparkContext, job: Job) {
 
     val adamRecords: RDD[ADAMRecord] = sc.adamLoad(args.inputPath)
-    val seqDict = adamRecords.adamGetSequenceDictionary()
-    println("!!!seqDict: " + seqDict.toString)
+    val mappedRecords = adamRecords.filter(_.getReadMapped)
 
-    val variantInfo: RDD[(ReferenceRegion, String)] = loadPositions(sc, seqDict, args.inputPathBeacon)
+    val seqDict = adamRecords.adamGetSequenceDictionary()
+
+    val variantInfo: RDD[(ReferenceRegion, String, Int)] = loadPositions(sc, seqDict, args.inputPathBeacon)
     val referenceRegions: RDD[ReferenceRegion] = variantInfo.map(_._1)
 
-    println("!!! Before filtering: ")
-    referenceRegions.collect().foreach(println)
-    println("!!! Size of ADAM records: " + adamRecords.collect().size)
-
-    val joinedRecords: RDD[(ReferenceRegion, ADAMRecord)] = RegionJoin.partitionAndJoin(sc, seqDict, referenceRegions, adamRecords)
+    val joinedRecords: RDD[(ReferenceRegion, ADAMRecord)] = RegionJoin.partitionAndJoin(sc, seqDict, referenceRegions, mappedRecords)
     val reducedRecords = joinedRecords.groupBy(_._2).map(_._1)
 
-    println("!!! After filtering: " + reducedRecords.collect().size)
-
     val pileUps = reducedRecords.adamRecords2Pileup()
-      .collect
 
-    pileUps.foreach(println)
+    //val mappedPileUps1 = pileUps.map(x => (ReferenceRegion(x.getContig.getContigName, x.getPosition, x.getPosition + 1), x.getReadBase))
+    val mappedPileUps1 = pileUps.map(x => x.getReadBase)
+    println("!!!mp1 " + mappedPileUps1.collect().length)
+    /*val groupedPileups = mappedPileUps1.groupBy(identity)
+    println("!!!gP " + groupedPileups.collect().length)
+    val mappedGroupPileups = groupedPileups.map(x => (x._1, x._2.size))
+    val collectedGRoups = mappedGroupPileups.collect
+    val mappedPileUps = collectedGRoups.toMap
+
+    variantInfo
+      .collect
+      .flatMap(x => getPileUpFreq(mappedPileUps, x))
+      .foreach(println)
+
+    println("PileUp size: " + pileUps.collect().length)*/
 
   }
 
-  def filterAdam(adamRecord: ADAMRecord, beaconRecords: Map[(String, Long, String), Array[(String, Long, String, Int)]]) = {
-    adamRecord match {
-      case x if !x.getReadMapped => None
-      case x if beaconRecords.contains(x.getContig.getContigName.toString, x.getStart) => Some(adamRecord)
+  def getPileUpFreq(mappedPileUps: Map[(ReferenceRegion, String), Int], element: (ReferenceRegion, String, Int)) = {
+    element match {
+      case x if mappedPileUps.contains((element._1, element._2)) =>
+        Some((element._1, element._2, element._3 + mappedPileUps((element._1, element._2))))
       case _ => None
     }
   }
 
   /**
    * This is a convenience method, for loading positions from tab-delimited files
-   * which have a format: Chromosome  Position  Allele (at least for their first three columns).
+   * which have a format: Chromosome  Position  Allele  AlleleReadFrequency (at least for their first four columns).
    *
    * @param sc A SparkContext
    * @param seqDict The sequence dictionary containing the refIds for all the contig/chromosomes listed
@@ -95,7 +103,7 @@ class BeaconReads(protected val args: BeaconReadsArgs) extends ADAMSparkCommand[
    * @throws IllegalArgumentException if the file contains a chromosome name that is not in the
    *                                  SequenceDictionary
    */
-  private def loadPositions(sc: SparkContext, seqDict: SequenceDictionary, path: String): RDD[(ReferenceRegion, String)] = {
+  private def loadPositions(sc: SparkContext, seqDict: SequenceDictionary, path: String): RDD[(ReferenceRegion, String, Int)] = {
     sc.textFile(path).filter(!_.startsWith("#")).map {
       //sc.parallelize(Source.fromFile(path).getLines().filter(!_.startsWith("#")).map {
       line =>
@@ -108,8 +116,9 @@ class BeaconReads(protected val args: BeaconReadsArgs) extends ADAMSparkCommand[
           }
           val start = array(1).toLong
           val allele = array(2)
-          val end = start + 10
-          (ReferenceRegion(chrom, start, end), allele)
+          val end = start + 1
+          val cnt = array(3).toInt
+          (ReferenceRegion(chrom, start, end), allele, cnt)
         }
     }
   }
